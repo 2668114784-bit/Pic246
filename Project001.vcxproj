@@ -129,6 +129,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="App.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Project001.h" />
     <ClInclude Include="Resource.h" />
@@ -136,6 +137,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Project001.cpp" />
+    <ClCompile Include="ImageOps.cpp" />
+    <ClCompile Include="CropCanvas.cpp" />
+    <ClCompile Include="PageResize.cpp" />
+    <ClCompile Include="PageCrop.cpp" />
+    <ClCompile Include="PageAdjust.cpp" />
+    <ClCompile Include="PageIco.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Project001.rc" />

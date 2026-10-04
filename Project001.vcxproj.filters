@@ -24,11 +24,32 @@
     <ClInclude Include="Resource.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="App.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="Project001.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="ImageOps.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CropCanvas.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageResize.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageCrop.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageAdjust.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageIco.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="Project001.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

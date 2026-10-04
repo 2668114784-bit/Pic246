@@ -1,408 +1,116 @@
 ﻿// ============================================================================
-//  Project001.cpp
-//  正方形图片尺寸处理工具（Win32 API + GDI+）
-//
-//  使用步骤：
-//    1) 点击“选择图片...”按钮（或把图片文件直接拖到窗口里）选择一张正方形图片；
-//    2) 在“输出尺寸”里选择缩小比例：1/2、1/4、1/6、1/8、1/10（只缩小，不放大）；
-//    3) 点击“处理”按钮，结果图片保存到与原图相同的文件夹，
-//       文件名后缀为 _2 / _4 / _6 / _8 / _10，扩展名与原图保持一致。
-//
-//  例：D:\pic\2048.png 选择 1/2  -> D:\pic\2048_2.png  (1024 × 1024)
-//      D:\pic\2048.png 选择 1/4  -> D:\pic\2048_4.png  (512  × 512)
-//      D:\pic\2048.png 选择 1/10 -> D:\pic\2048_10.png (205  × 205)
-//
-//  缩放使用 GDI+ 高质量双三次插值（HighQualityBicubic + TileFlipXY），
-//  并且先分块读取到内存流再解码，不会锁定原文件。
+//  Project001.cpp —— Pic246 主窗口
+//    · 左侧功能导航（侧边栏）
+//    · 顶部：选择图片 / 路径 / 原图信息
+//    · 底部：状态栏
+//    · 中间：4 个功能页（图片尺寸缩放 / 图片裁切 / 图片调整 / ICO 转换）
 // ============================================================================
-
-#include "framework.h"
-#include "Project001.h"
-
-#include <windowsx.h>
-#include <objbase.h>
-#include <commctrl.h>
-#include <commdlg.h>
-#include <shellapi.h>
-#include <gdiplus.h>
-
-#include <stdio.h>
-#include <wchar.h>
-#include <string>
-#include <vector>
-
-#pragma comment(lib, "gdiplus.lib")
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "comdlg32.lib")
-#pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "ole32.lib")
-// 使用 Windows 视觉样式（新版按钮 / 单选钮外观）
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#include "App.h"
 
 using namespace Gdiplus;
 
-// ---------------------------------------------------------------------------
-// 常量 / ID
-// ---------------------------------------------------------------------------
-#define MAX_LOADSTRING      100
-#define APP_CLASS_NAME      L"Project001ImageResizeWnd"
-#define APP_WINDOW_TITLE    L"Pic246"
-
-enum : int
-{
-    IDC_BTN_OPEN        = 1001,
-    IDC_BTN_PROCESS     = 1002,
-    IDC_GRP_SCALE       = 1003,
-    IDC_RADIO_HALF      = 1011,
-    IDC_RADIO_QUARTER   = 1012,
-    IDC_RADIO_SIXTH     = 1013,
-    IDC_RADIO_EIGHTH    = 1014,
-    IDC_RADIO_TENTH     = 1015,
-    IDC_STATIC_PATH     = 1021,
-    IDC_STATIC_INFO     = 1022,
-    IDC_STATIC_OUT      = 1023,
-    IDC_STATIC_PREVIEW  = 1024,
-    IDC_STATIC_STATUS   = 1025,
-
-    IDM_OPEN_IMAGE      = 40001,
-    IDM_PROCESS_SAVE    = 40002,
-};
-
-// 缩放选项：num/den 为比例，suffix 为输出文件名后缀
-struct ScaleOption
-{
-    const wchar_t* label;
-    const wchar_t* suffix;
-    int            num;
-    int            den;
-};
-
-static const ScaleOption kScales[] =
-{
-    { L"1/2",  L"_2",  1, 2  },
-    { L"1/4",  L"_4",  1, 4  },
-    { L"1/6",  L"_6",  1, 6  },
-    { L"1/8",  L"_8",  1, 8  },
-    { L"1/10", L"_10", 1, 10 },
-};
-static const int kScaleCount = _countof(kScales);
-
-// 支持的输出格式
-struct FmtInfo
-{
-    const wchar_t* ext;
-    const wchar_t* mime;
-};
-
-static const FmtInfo kFmts[] =
-{
-    { L".png",  L"image/png"  },
-    { L".jpg",  L"image/jpeg" },
-    { L".jpeg", L"image/jpeg" },
-    { L".bmp",  L"image/bmp"  },
-    { L".gif",  L"image/gif"  },
-    { L".tif",  L"image/tiff" },
-    { L".tiff", L"image/tiff" },
-};
+#define MAX_LOADSTRING 100
 
 // ---------------------------------------------------------------------------
-// 图标资源 ID 兼容处理
-//
-//  注意：在 VS 的“资源视图”里导入/替换图标后，资源编辑器会重写 resource.h，
-//  原来的符号名（如 IDI_PROJECT001）可能被改掉或删掉（例如新图标会叫 IDI_ICON2）。
-//  所以这里按优先级挑一个当前存在的图标 ID；一个都没有时用系统图标兜底，
-//  以后再换图标也不会因此编译不过。
+// 全局状态
 // ---------------------------------------------------------------------------
-#if defined(IDI_PROJECT001)
-#  define APP_ICON_MAIN_ID   IDI_PROJECT001
-#elif defined(IDI_ICON2)
-#  define APP_ICON_MAIN_ID   IDI_ICON2
-#elif defined(IDI_ICON1)
-#  define APP_ICON_MAIN_ID   IDI_ICON1
-#elif defined(IDR_MAINFRAME)
-#  define APP_ICON_MAIN_ID   IDR_MAINFRAME
-#else
-#  define APP_ICON_MAIN_ID   0
-#endif
-
-#if defined(IDI_SMALL)
-#  define APP_ICON_SMALL_ID  IDI_SMALL
-#elif defined(IDI_PROJECT001)
-#  define APP_ICON_SMALL_ID  IDI_PROJECT001
-#elif defined(IDI_ICON2)
-#  define APP_ICON_SMALL_ID  IDI_ICON2
-#else
-#  define APP_ICON_SMALL_ID  0
-#endif
-
-// ---------------------------------------------------------------------------
-// 全局变量
-// ---------------------------------------------------------------------------
-HINSTANCE   hInst = nullptr;
-ULONG_PTR   g_gdiplusToken = 0;
-
-HWND        g_hMain = nullptr;
-HWND        g_hBtnOpen = nullptr;
-HWND        g_hBtnProcess = nullptr;
-HWND        g_hGrpScale = nullptr;
-HWND        g_hRadios[kScaleCount] = {};
-HWND        g_hPath = nullptr;
-HWND        g_hInfo = nullptr;
-HWND        g_hOut = nullptr;
-HWND        g_hPreview = nullptr;
-HWND        g_hStatus = nullptr;
-
-HFONT       g_hFont = nullptr;
-HACCEL      g_hAccelExtra = nullptr;
-int         g_dpi = 96;
-
-std::wstring    g_srcPath;              // 当前图片完整路径
-Image*          g_pSrcImage = nullptr;  // 解码后的原图
-IStream*        g_pSrcStream = nullptr; // 内存流（必须与 g_pSrcImage 同生命周期）
+HINSTANCE       g_hInst = nullptr;
+HWND            g_hMain = nullptr;
+int             g_dpi = 96;
+HFONT           g_hUiFont = nullptr;
+std::wstring    g_srcPath;
+Gdiplus::Image* g_pSrcImage = nullptr;
+IStream*        g_pSrcStream = nullptr;
 UINT            g_srcW = 0;
 UINT            g_srcH = 0;
-Bitmap*         g_pPreview = nullptr;   // 预览用小图
+bool            g_srcHasAlpha = false;
+COLORREF        g_fillColor = RGB(255, 255, 255);
 
-// --------------------------------------------------------------------------
-// 小工具
 // ---------------------------------------------------------------------------
-static inline int D(int dip) { return MulDiv(dip, g_dpi, 96); }
+// 主窗口控件
+// ---------------------------------------------------------------------------
+static HWND  g_hSidebar = nullptr;
+static HWND  g_hBtnOpen = nullptr;
+static HWND  g_hPath = nullptr;
+static HWND  g_hInfo = nullptr;
+static HWND  g_hStatus = nullptr;
 
-static void SetStatus(const std::wstring& text)
+#define PAGE_COUNT 4
+static HWND  g_pages[PAGE_COUNT] = {};
+static int   g_curPage = 0;
+
+static const wchar_t* kPageNames[PAGE_COUNT] =
+{
+    L"图片尺寸缩放", L"图片裁切", L"图片调整", L"ICO 转换"
+};
+
+static const int kPageProcessId[PAGE_COUNT] =
+{
+    IDC_RS_BTN_PROCESS, IDC_CP_BTN_PROCESS, IDC_AD_BTN_PROCESS, IDC_IC_BTN_PROCESS
+};
+
+static HACCEL g_hAccelExtra = nullptr;
+
+// ---------------------------------------------------------------------------
+// 通用工具
+// ---------------------------------------------------------------------------
+void ApplyUiFont(HWND h)
+{
+    if (h && g_hUiFont)
+        SendMessageW(h, WM_SETFONT, (WPARAM)g_hUiFont, MAKELPARAM(TRUE, 0));
+}
+
+HWND CreateCtl(const wchar_t* cls, const wchar_t* text, DWORD style, HWND parent, int id, DWORD exStyle)
+{
+    HWND h = CreateWindowExW(exStyle, cls, text, style | WS_CHILD,
+                             0, 0, 0, 0, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+    ApplyUiFont(h);
+    return h;
+}
+
+void SetAppStatus(const std::wstring& text)
 {
     if (g_hStatus)
+    {
         SetWindowTextW(g_hStatus, text.c_str());
+        UpdateWindow(g_hStatus);
+    }
 }
 
-static std::wstring FileNameOf(const std::wstring& path)
+static HFONT CreateUiFont()
 {
-    size_t p = path.find_last_of(L"\\/");
-    return (p == std::wstring::npos) ? path : path.substr(p + 1);
+    NONCLIENTMETRICSW ncm = {};
+    ncm.cbSize = sizeof(ncm);
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
+    {
+        HFONT h = CreateFontIndirectW(&ncm.lfMessageFont);
+        if (h) return h;
+    }
+    return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
 }
 
-static std::wstring DirNameOf(const std::wstring& path)
+static HICON LoadAppIcon(HINSTANCE hInstance, int cx, int cy, const int* ids, int count)
 {
-    size_t p = path.find_last_of(L"\\/");
-    return (p == std::wstring::npos) ? std::wstring() : path.substr(0, p + 1);
-}
-
-static const FmtInfo* FindFmt(const std::wstring& ext)
-{
-    for (int i = 0; i < (int)_countof(kFmts); ++i)
-        if (_wcsicmp(kFmts[i].ext, ext.c_str()) == 0)
-            return &kFmts[i];
-    return nullptr;
-}
-
-static bool FileExists(const std::wstring& path)
-{
-    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
-// 计算缩放后的边长（四舍五入，最小 1 像素）
-static int ScaledEdge(UINT srcEdge, const ScaleOption& opt)
-{
-    LONGLONG v = ((LONGLONG)srcEdge * opt.num + opt.den / 2) / opt.den;
-    if (v < 1) v = 1;
-    return (int)v;
+    for (int i = 0; i < count; ++i)
+    {
+        if (ids[i] == 0)
+            continue;
+        HICON h = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(ids[i]), IMAGE_ICON, cx, cy, LR_SHARED);
+        if (h)
+            return h;
+    }
+    return LoadIconW(nullptr, IDI_APPLICATION);
 }
 
 // ---------------------------------------------------------------------------
-// GDI+ 辅助
+// 图片载入
 // ---------------------------------------------------------------------------
-static bool GetEncoderClsid(const wchar_t* mime, CLSID* pClsid)
+static void UpdateTopInfo()
 {
-    UINT num = 0, size = 0;
-    if (GetImageEncodersSize(&num, &size) != Ok || size == 0)
-        return false;
-
-    std::vector<BYTE> buf(size);
-    ImageCodecInfo* pInfo = (ImageCodecInfo*)buf.data();
-    if (GetImageEncoders(num, size, pInfo) != Ok)
-        return false;
-
-    for (UINT i = 0; i < num; ++i)
-    {
-        if (_wcsicmp(pInfo[i].MimeType, mime) == 0)
-        {
-            *pClsid = pInfo[i].Clsid;
-            return true;
-        }
-    }
-    return false;
-}
-
-// 高质量缩放
-static Bitmap* ResizeBitmap(Image* src, int newW, int newH, std::wstring& err)
-{
-    if (newW < 1) newW = 1;
-    if (newH < 1) newH = 1;
-
-    Bitmap* dst = new Bitmap(newW, newH, PixelFormat32bppARGB);
-    if (dst->GetLastStatus() != Ok)
-    {
-        delete dst;
-        err = L"创建目标位图失败（内存不足？）";
-        return nullptr;
-    }
-
-    {
-        Graphics g(dst);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-        g.SetSmoothingMode(SmoothingModeHighQuality);
-        g.SetCompositingQuality(CompositingQualityHighQuality);
-        g.SetCompositingMode(CompositingModeSourceCopy);
-
-        ImageAttributes attr;
-        attr.SetWrapMode(WrapModeTileFlipXY);   // 消除边缘黑边
-
-        RectF dest(0.0f, 0.0f, (REAL)newW, (REAL)newH);
-        Status st = g.DrawImage(src, dest,
-                                0.0f, 0.0f, (REAL)src->GetWidth(), (REAL)src->GetHeight(),
-                                UnitPixel, &attr);
-        if (st != Ok)
-        {
-            delete dst;
-            err = L"缩放绘制失败。";
-            return nullptr;
-        }
-    }
-    return dst;
-}
-
-// ---------------------------------------------------------------------------
-// 载入图片
-// ---------------------------------------------------------------------------
-static void ClearImage()
-{
-    if (g_pPreview) { delete g_pPreview; g_pPreview = nullptr; }
-    if (g_pSrcImage) { delete g_pSrcImage; g_pSrcImage = nullptr; }
-    if (g_pSrcStream) { g_pSrcStream->Release(); g_pSrcStream = nullptr; }
-    g_srcW = g_srcH = 0;
-    g_srcPath.clear();
-}
-
-// 先把文件整个读进内存，再用内存流交给 GDI+，避免 GDI+ 长期锁定原文件
-static bool LoadImageFile(const std::wstring& path, std::wstring& err)
-{
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE)
-    {
-        err = L"无法打开文件：\r\n" + path;
-        return false;
-    }
-
-    LARGE_INTEGER liSize = {};
-    if (!GetFileSizeEx(hFile, &liSize) || liSize.QuadPart <= 0)
-    {
-        CloseHandle(hFile);
-        err = L"文件为空或无法读取文件大小。";
-        return false;
-    }
-    if (liSize.QuadPart > 1024LL * 1024 * 1024)
-    {
-        CloseHandle(hFile);
-        err = L"文件过大（超过 1 GB），暂不支持。";
-        return false;
-    }
-
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)liSize.QuadPart);
-    if (!hMem)
-    {
-        CloseHandle(hFile);
-        err = L"内存不足，无法读入图片。";
-        return false;
-    }
-
-    BYTE* pData = (BYTE*)GlobalLock(hMem);
-    LONGLONG total = 0;
-    bool ok = (pData != nullptr);
-    while (ok && total < liSize.QuadPart)
-    {
-        DWORD want = (DWORD)((liSize.QuadPart - total) > (1 << 20) ? (1 << 20) : (liSize.QuadPart - total));
-        DWORD got = 0;
-        if (!ReadFile(hFile, pData + total, want, &got, nullptr) || got == 0)
-            ok = false;
-        else
-            total += got;
-    }
-    GlobalUnlock(hMem);
-    CloseHandle(hFile);
-
-    if (!ok)
-    {
-        GlobalFree(hMem);
-        err = L"读取文件失败。";
-        return false;
-    }
-
-    IStream* pStream = nullptr;
-    if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &pStream)))
-    {
-        GlobalFree(hMem);
-        err = L"创建内存流失败。";
-        return false;
-    }
-
-    Image* pImg = Image::FromStream(pStream);
-    if (!pImg || pImg->GetLastStatus() != Ok || pImg->GetWidth() == 0 || pImg->GetHeight() == 0)
-    {
-        delete pImg;
-        pStream->Release();
-        err = L"无法解析该图片，格式不受支持或文件已损坏。\r\n\r\n支持：PNG / JPG / BMP / GIF / TIFF";
-        return false;
-    }
-
-    ClearImage();
-    g_pSrcImage = pImg;
-    g_pSrcStream = pStream;          // 与图片同生命周期
-    g_srcW = pImg->GetWidth();
-    g_srcH = pImg->GetHeight();
-    g_srcPath = path;
-    return true;
-}
-
-// 预览小图（最长边 512 像素，绘制时再自适应缩放）
-static void BuildPreview()
-{
-    if (g_pPreview) { delete g_pPreview; g_pPreview = nullptr; }
-    if (!g_pSrcImage) return;
-
-    const int kMax = 512;
-    double s = 1.0;
-    if ((UINT)kMax < g_srcW || (UINT)kMax < g_srcH)
-    {
-        double sx = (double)kMax / (double)g_srcW;
-        double sy = (double)kMax / (double)g_srcH;
-        s = (sx < sy) ? sx : sy;
-    }
-
-    int pw = (int)(g_srcW * s + 0.5);
-    int ph = (int)(g_srcH * s + 0.5);
-
-    std::wstring err;
-    g_pPreview = ResizeBitmap(g_pSrcImage, pw, ph, err);
-}
-
-// ---------------------------------------------------------------------------
-// 界面文本
-// ---------------------------------------------------------------------------
-static int CurrentScaleIndex()
-{
-    for (int i = 0; i < kScaleCount; ++i)
-        if (Button_GetCheck(g_hRadios[i]) == BST_CHECKED)
-            return i;
-    return 0;
-}
-
-static void UpdateInfoLabel()
-{
-    wchar_t buf[256];
+    wchar_t buf[512];
     if (!g_pSrcImage)
     {
-        wcscpy_s(buf, L"尚未选择图片。点击「选择图片...」，或把图片文件拖到窗口中。");
+        wcscpy_s(buf, L"尚未选择图片。点击「选择图片...」，或把图片文件拖进窗口。");
     }
     else if (g_srcW == g_srcH)
     {
@@ -410,202 +118,38 @@ static void UpdateInfoLabel()
     }
     else
     {
-        swprintf_s(buf, L"原图尺寸：%u × %u 像素（非正方形，将按相同比例缩放）", g_srcW, g_srcH);
+        swprintf_s(buf, L"原图尺寸：%u × %u 像素", g_srcW, g_srcH);
     }
     SetWindowTextW(g_hInfo, buf);
 }
 
-static void UpdateOutLabel()
-{
-    if (!g_hOut) return;
-
-    wchar_t buf[256];
-    if (!g_pSrcImage)
-    {
-        wcscpy_s(buf, L"输出尺寸：—");
-    }
-    else
-    {
-        const ScaleOption& opt = kScales[CurrentScaleIndex()];
-        int nw = ScaledEdge(g_srcW, opt);
-        int nh = ScaledEdge(g_srcH, opt);
-        swprintf_s(buf, L"输出尺寸：%d × %d 像素   后缀：%s", nw, nh, opt.suffix);
-    }
-    SetWindowTextW(g_hOut, buf);
-}
-
-// ---------------------------------------------------------------------------
-// 预览绘制（SS_OWNERDRAW 静态控件的 WM_DRAWITEM）
-// ---------------------------------------------------------------------------
-static void PaintPreview(const DRAWITEMSTRUCT* dis)
-{
-    const int w = dis->rcItem.right - dis->rcItem.left;
-    const int h = dis->rcItem.bottom - dis->rcItem.top;
-    if (w <= 0 || h <= 0) return;
-
-    HDC hdc = dis->hDC;
-    HDC mem = CreateCompatibleDC(hdc);
-    HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
-    HGDIOBJ oldBmp = SelectObject(mem, bmp);
-
-    RECT all = { 0, 0, w, h };
-    HBRUSH bWhite = CreateSolidBrush(RGB(255, 255, 255));
-    HBRUSH bGray = CreateSolidBrush(RGB(237, 239, 241));
-    FillRect(mem, &all, bWhite);
-
-    // 透明棋盘格背景
-    const int cell = D(10);
-    if (cell > 0)
-    {
-        for (int y = 0; y < h; y += cell)
-        {
-            for (int x = 0; x < w; x += cell)
-            {
-                if (((x / cell) + (y / cell)) & 1)
-                {
-                    RECT c;
-                    c.left = x;
-                    c.top = y;
-                    c.right = (x + cell < w) ? (x + cell) : w;
-                    c.bottom = (y + cell < h) ? (y + cell) : h;
-                    FillRect(mem, &c, bGray);
-                }
-            }
-        }
-    }
-
-    if (g_pPreview)
-    {
-        Graphics g(mem);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-
-        const int pad = D(8);
-        int aw = w - pad * 2;
-        int ah = h - pad * 2;
-        if (aw < 1) aw = 1;
-        if (ah < 1) ah = 1;
-
-        int iw = (int)g_pPreview->GetWidth();
-        int ih = (int)g_pPreview->GetHeight();
-        double s = (double)aw / iw;
-        double sy = (double)ah / ih;
-        if (sy < s) s = sy;
-
-        int dw = (int)(iw * s + 0.5);
-        int dh = (int)(ih * s + 0.5);
-        if (dw < 1) dw = 1;
-        if (dh < 1) dh = 1;
-
-        REAL x = (REAL)((w - dw) / 2.0);
-        REAL y = (REAL)((h - dh) / 2.0);
-        g.DrawImage(g_pPreview, RectF(x, y, (REAL)dw, (REAL)dh),
-                    0, 0, (REAL)iw, (REAL)ih, UnitPixel);
-    }
-    else
-    {
-        SetBkMode(mem, TRANSPARENT);
-        SetTextColor(mem, RGB(110, 116, 124));
-        HGDIOBJ oldFont = SelectObject(mem, g_hFont);
-        DrawTextW(mem,
-                  L"点击「选择图片...」载入图片\r\n也可以直接把图片文件拖到窗口中",
-                  -1, &all, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
-        SelectObject(mem, oldFont);
-    }
-
-    HBRUSH bBorder = CreateSolidBrush(RGB(205, 208, 212));
-    FrameRect(mem, &all, bBorder);
-    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-
-    DeleteObject(bBorder);
-    DeleteObject(bWhite);
-    DeleteObject(bGray);
-    SelectObject(mem, oldBmp);
-    DeleteObject(bmp);
-    DeleteDC(mem);
-}
-
-// ---------------------------------------------------------------------------
-// 窗口布局
-// ---------------------------------------------------------------------------
-static void LayoutControls(HWND hWnd)
-{
-    RECT rc;
-    GetClientRect(hWnd, &rc);
-    const int cx = rc.right - rc.left;
-    const int cy = rc.bottom - rc.top;
-    const int M = D(16);
-    const int gap = D(10);
-
-    // 第一行：选择图片按钮 + 路径
-    int y = D(16);
-    int hRow = D(34);
-    MoveWindow(g_hBtnOpen, M, y, D(140), hRow, TRUE);
-    int x = M + D(140) + gap;
-    MoveWindow(g_hPath, x, y, cx - x - M, hRow, TRUE);
-
-    // 第二行：原图信息
-    y += hRow + D(8);
-    MoveWindow(g_hInfo, M, y + D(4), cx - M * 2, D(20), TRUE);
-
-    // 输出尺寸分组框
-    y += D(26);
-    int grpH = D(92);
-    MoveWindow(g_hGrpScale, M, y, cx - M * 2, grpH, TRUE);
-
-    int ry = y + D(36);
-    int rx = M + D(20);
-    for (int i = 0; i < kScaleCount; ++i)
-    {
-        MoveWindow(g_hRadios[i], rx, ry, D(76), D(26), TRUE);
-        rx += D(84);
-    }
-    MoveWindow(g_hOut, rx + D(16), ry, cx - M - (rx + D(16)), D(26), TRUE);
-
-    // 预览区
-    y += grpH + D(14);
-    int bottomH = D(40);
-    int previewH = cy - y - bottomH - M * 2;
-    if (previewH < D(80)) previewH = D(80);
-    MoveWindow(g_hPreview, M, y, cx - M * 2, previewH, TRUE);
-
-    // 底部：处理按钮 + 状态栏
-    int by = cy - M - bottomH;
-    MoveWindow(g_hBtnProcess, M, by, D(150), bottomH, TRUE);
-    int sx = M + D(150) + gap;
-    MoveWindow(g_hStatus, sx, by, cx - sx - M, bottomH, TRUE);
-}
-
-// ---------------------------------------------------------------------------
-// 选择 / 载入图片
-// ---------------------------------------------------------------------------
 static void OpenImagePath(HWND hWnd, const std::wstring& path)
 {
     HCURSOR hOld = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
 
     std::wstring err;
     bool ok = LoadImageFile(path, err);
-    if (ok)
-        BuildPreview();
 
     SetCursor(hOld);
 
     if (!ok)
     {
         MessageBoxW(hWnd, err.c_str(), L"打开失败", MB_OK | MB_ICONERROR);
-        SetStatus(L"载入失败：" + FileNameOf(path));
+        SetAppStatus(L"载入失败：" + FileNameOf(path));
         return;
     }
 
     SetWindowTextW(g_hPath, path.c_str());
-    UpdateInfoLabel();
-    UpdateOutLabel();
-    InvalidateRect(g_hPreview, nullptr, TRUE);
+    UpdateTopInfo();
+
+    // 通知所有功能页刷新
+    for (int i = 0; i < PAGE_COUNT; ++i)
+        if (g_pages[i])
+            SendMessageW(g_pages[i], WM_APP_IMAGE_CHANGED, 0, 0);
 
     wchar_t buf[512];
-    swprintf_s(buf, L"已载入 %s（%u × %u）。请选择输出尺寸后点击「处理」。",
-               FileNameOf(path).c_str(), g_srcW, g_srcH);
-    SetStatus(buf);
+    swprintf_s(buf, L"已载入 %s（%u × %u）。", FileNameOf(path).c_str(), g_srcW, g_srcH);
+    SetAppStatus(buf);
 }
 
 static void OnOpenImage(HWND hWnd)
@@ -625,7 +169,7 @@ static void OnOpenImage(HWND hWnd)
         L"所有文件 (*.*)\0*.*\0\0";
     ofn.lpstrFile = buf.data();
     ofn.nMaxFile = (DWORD)buf.size();
-    ofn.lpstrTitle = L"选择一张（正方形）图片";
+    ofn.lpstrTitle = L"选择一张图片";
     ofn.lpstrDefExt = L"png";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_HIDEREADONLY;
 
@@ -636,148 +180,278 @@ static void OnOpenImage(HWND hWnd)
 }
 
 // ---------------------------------------------------------------------------
-// 处理
+// 侧边栏
 // ---------------------------------------------------------------------------
-static void OnProcessImage(HWND hWnd)
+#define SIDEBAR_CLASS L"Pic246Sidebar"
+
+struct SidebarState
 {
-    if (!g_pSrcImage)
+    int  hover;
+    int  sel;
+    bool tracking;
+};
+
+static SidebarState* SidebarOf(HWND h)
+{
+    return (SidebarState*)GetWindowLongPtrW(h, GWLP_USERDATA);
+}
+
+static int SidebarItemsTop() { return D(64); }
+static int SidebarItemH() { return D(52); }
+
+static int SidebarHit(int y)
+{
+    const int top = SidebarItemsTop();
+    if (y < top) return -1;
+    int idx = (y - top) / SidebarItemH();
+    if (idx < 0 || idx >= PAGE_COUNT) return -1;
+    return idx;
+}
+
+static void PaintSidebar(HWND h)
+{
+    SidebarState* st = SidebarOf(h);
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(h, &ps);
+
+    RECT rc;
+    GetClientRect(h, &rc);
+    const int w = rc.right;
+    const int hgt = rc.bottom;
+
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, w, hgt);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+
+    // 背景
+    HBRUSH bg = CreateSolidBrush(RGB(247, 248, 250));
+    RECT all = { 0, 0, w, hgt };
+    FillRect(mem, &all, bg);
+
+    SetBkMode(mem, TRANSPARENT);
+    HGDIOBJ oldFont = SelectObject(mem, g_hUiFont);
+
+    // 标题
+    RECT tr = { D(16), D(16), w, D(44) };
+    SetTextColor(mem, RGB(28, 32, 38));
+    DrawTextW(mem, APP_NAME, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // 分隔线
+    HPEN sep = CreatePen(PS_SOLID, 1, RGB(228, 231, 236));
+    HGDIOBJ oldPen = SelectObject(mem, sep);
+    MoveToEx(mem, 0, D(56), nullptr);
+    LineTo(mem, w, D(56));
+    SelectObject(mem, oldPen);
+    DeleteObject(sep);
+
+    // 菜单项
+    const int top = SidebarItemsTop();
+    const int itemH = SidebarItemH();
+
+    for (int i = 0; i < PAGE_COUNT; ++i)
     {
-        MessageBoxW(hWnd, L"请先点击「选择图片...」载入一张图片。", L"提示",
-                    MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+        RECT ir = { 0, top + i * itemH, w, top + (i + 1) * itemH };
+        const bool sel = (st && st->sel == i);
+        const bool hov = (st && st->hover == i);
 
-    const ScaleOption& opt = kScales[CurrentScaleIndex()];
-    const int newW = ScaledEdge(g_srcW, opt);
-    const int newH = ScaledEdge(g_srcH, opt);
-
-    if (g_srcW != g_srcH)
-    {
-        wchar_t q[512];
-        swprintf_s(q, L"当前图片不是正方形（%u × %u）。\r\n\r\n是否仍按相同比例缩放并输出？",
-                   g_srcW, g_srcH);
-        if (MessageBoxW(hWnd, q, L"提示", MB_YESNO | MB_ICONQUESTION) != IDYES)
-            return;
-    }
-
-    // 大图内存提示
-    LONGLONG pixels = (LONGLONG)newW * newH;
-    if (pixels > 100000000LL)
-    {
-        wchar_t q[512];
-        swprintf_s(q, L"输出尺寸为 %d × %d，大约需要 %lld MB 内存。\r\n\r\n是否继续？",
-                   newW, newH, (pixels * 4) / (1024 * 1024));
-        if (MessageBoxW(hWnd, q, L"提示", MB_YESNO | MB_ICONQUESTION) != IDYES)
-            return;
-    }
-
-    // 计算输出路径：同目录 + 原文件名 + 后缀 + 原扩展名
-    const std::wstring dir = DirNameOf(g_srcPath);
-    std::wstring name = FileNameOf(g_srcPath);
-    std::wstring stem = name;
-    std::wstring ext;
-    size_t dot = name.find_last_of(L'.');
-    if (dot != std::wstring::npos && dot > 0)
-    {
-        stem = name.substr(0, dot);
-        ext = name.substr(dot);
-    }
-
-    const FmtInfo* fmt = FindFmt(ext);
-    if (!fmt)
-    {
-        ext = L".png";                 // 扩展名不认识时，统一按 PNG 输出
-        fmt = FindFmt(ext);
-    }
-
-    std::wstring outPath = dir + stem + opt.suffix + ext;
-
-    if (FileExists(outPath))
-    {
-        wchar_t q[1024];
-        swprintf_s(q, L"输出文件已存在：\r\n%s\r\n\r\n是否覆盖？", outPath.c_str());
-        if (MessageBoxW(hWnd, q, L"确认覆盖", MB_YESNO | MB_ICONWARNING) != IDYES)
+        if (sel || hov)
         {
-            SetStatus(L"已取消：输出文件已存在。");
-            return;
+            RECT hr = ir;
+            hr.left += D(8);
+            hr.right -= D(8);
+            hr.top += D(4);
+            hr.bottom -= D(4);
+            HBRUSH hb = CreateSolidBrush(sel ? RGB(224, 237, 252) : RGB(238, 242, 247));
+            HGDIOBJ op = SelectObject(mem, GetStockObject(NULL_PEN));
+            HGDIOBJ ob = SelectObject(mem, hb);
+            RoundRect(mem, hr.left, hr.top, hr.right, hr.bottom, D(10), D(10));
+            SelectObject(mem, ob);
+            SelectObject(mem, op);
+            DeleteObject(hb);
         }
-    }
 
-    CLSID clsid = {};
-    if (!GetEncoderClsid(fmt->mime, &clsid))
-    {
-        MessageBoxW(hWnd, L"系统中找不到对应的图片编码器，无法保存。", L"错误",
-                    MB_OK | MB_ICONERROR);
-        return;
-    }
-
-    // 处理中
-    SetStatus(L"正在处理，请稍候...");
-    UpdateWindow(g_hStatus);
-    EnableWindow(g_hBtnOpen, FALSE);
-    EnableWindow(g_hBtnProcess, FALSE);
-    HCURSOR hOld = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
-
-    std::wstring err;
-    Bitmap* dst = ResizeBitmap(g_pSrcImage, newW, newH, err);
-    Status st = GenericError;
-    bool saved = false;
-
-    if (dst)
-    {
-        // GDI+ 覆盖已存在文件可能失败，先删掉
-        if (FileExists(outPath))
-            DeleteFileW(outPath.c_str());
-
-        if (_wcsicmp(fmt->mime, L"image/jpeg") == 0)
+        if (sel)
         {
-            ULONG quality = 95;
-            EncoderParameters ep;
-            ep.Count = 1;
-            ep.Parameter[0].Guid = EncoderQuality;
-            ep.Parameter[0].Type = EncoderParameterValueTypeLong;
-            ep.Parameter[0].NumberOfValues = 1;
-            ep.Parameter[0].Value = &quality;
-            st = dst->Save(outPath.c_str(), &clsid, &ep);
+            RECT acc = { D(8), top + i * itemH + D(4), D(12), top + (i + 1) * itemH - D(4) };
+            HBRUSH ab = CreateSolidBrush(RGB(0, 120, 215));
+            FillRect(mem, &acc, ab);
+            DeleteObject(ab);
         }
-        else
+
+        RECT lr = { D(24), ir.top, w - D(12), ir.bottom };
+        SetTextColor(mem, sel ? RGB(0, 92, 180) : RGB(48, 52, 58));
+        DrawTextW(mem, kPageNames[i], -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // 右边框
+    HPEN edge = CreatePen(PS_SOLID, 1, RGB(226, 229, 234));
+    oldPen = SelectObject(mem, edge);
+    MoveToEx(mem, w - 1, 0, nullptr);
+    LineTo(mem, w - 1, hgt);
+    SelectObject(mem, oldPen);
+    DeleteObject(edge);
+
+    SelectObject(mem, oldFont);
+    BitBlt(hdc, 0, 0, w, hgt, mem, 0, 0, SRCCOPY);
+
+    DeleteObject(bg);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    EndPaint(h, &ps);
+}
+
+static LRESULT CALLBACK SidebarProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    SidebarState* st = SidebarOf(hWnd);
+
+    switch (message)
+    {
+    case WM_NCCREATE:
         {
-            st = dst->Save(outPath.c_str(), &clsid, nullptr);
+            SidebarState* s = new SidebarState();
+            s->hover = -1;
+            s->sel = 0;
+            s->tracking = false;
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)s);
         }
-        saved = (st == Ok);
-        delete dst;
-        dst = nullptr;
+        return TRUE;
+
+    case WM_NCDESTROY:
+        if (st) { delete st; SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0); }
+        return 0;
+
+    case WM_PAINT:
+        PaintSidebar(hWnd);
+        return 0;
+
+    case WM_MOUSEMOVE:
+        if (st)
+        {
+            if (!st->tracking)
+            {
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                TrackMouseEvent(&tme);
+                st->tracking = true;
+            }
+            int idx = SidebarHit(GET_Y_LPARAM(lParam));
+            if (idx != st->hover)
+            {
+                st->hover = idx;
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+            SetCursor(LoadCursorW(nullptr, idx >= 0 ? IDC_HAND : IDC_ARROW));
+        }
+        return 0;
+
+    case WM_MOUSELEAVE:
+        if (st)
+        {
+            st->tracking = false;
+            if (st->hover != -1)
+            {
+                st->hover = -1;
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        if (st)
+        {
+            int idx = SidebarHit(GET_Y_LPARAM(lParam));
+            if (idx >= 0)
+            {
+                st->sel = idx;
+                InvalidateRect(hWnd, nullptr, FALSE);
+                PostMessageW(GetParent(hWnd), WM_APP_PAGE_SELECT, (WPARAM)idx, 0);
+            }
+        }
+        return 0;
+
+    default:
+        break;
     }
-
-    SetCursor(hOld);
-    EnableWindow(g_hBtnOpen, TRUE);
-    EnableWindow(g_hBtnProcess, TRUE);
-
-    if (!saved)
-    {
-        if (err.empty())
-            err = L"保存文件失败（目标文件可能被其它程序占用，或没有写入权限）。";
-        MessageBoxW(hWnd, err.c_str(), L"处理失败", MB_OK | MB_ICONERROR);
-        SetStatus(L"处理失败：" + err);
-        return;
-    }
-
-    wchar_t msg[1200];
-    swprintf_s(msg, L"处理完成！\r\n\r\n输出文件：\r\n%s\r\n\r\n输出尺寸：%d × %d 像素\r\n\r\n是否打开输出文件所在的文件夹？",
-               outPath.c_str(), newW, newH);
-
-    SetStatus(std::wstring(L"处理完成：") + outPath + L"  (" +
-              std::to_wstring(newW) + L" × " + std::to_wstring(newH) + L")");
-
-    if (MessageBoxW(hWnd, msg, L"处理完成", MB_YESNO | MB_ICONINFORMATION) == IDYES)
-    {
-        std::wstring arg = L"/select,\"" + outPath + L"\"";
-        ShellExecuteW(hWnd, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
-    }
+    return DefWindowProcW(hWnd, message, wParam, lParam);
 }
 
 // ---------------------------------------------------------------------------
-// 菜单（在资源菜单“文件”里追加两项，不修改 .rc）
+// 布局
+// ---------------------------------------------------------------------------
+static void GetGeom(HWND hWnd, int* cx, int* cy, int* sw, int* topH, int* stH)
+{
+    RECT rc;
+    GetClientRect(hWnd, &rc);
+    if (cx) *cx = rc.right;
+    if (cy) *cy = rc.bottom;
+    if (sw) *sw = D(SIDEBAR_W_DIP);
+    if (topH) *topH = D(TOPBAR_H_DIP);
+    if (stH) *stH = D(STATUSBAR_H_DIP);
+}
+
+static void LayoutMain(HWND hWnd)
+{
+    int cx = 0, cy = 0, sw = 0, topH = 0, stH = 0;
+    GetGeom(hWnd, &cx, &cy, &sw, &topH, &stH);
+
+    MoveWindow(g_hSidebar, 0, 0, sw, cy, TRUE);
+
+    const int x = sw + D(14);
+    const int y = D(14);
+    MoveWindow(g_hBtnOpen, x, y, D(132), D(34), TRUE);
+    const int px = x + D(132) + D(10);
+    MoveWindow(g_hPath, px, y, cx - px - D(14), D(34), TRUE);
+    MoveWindow(g_hInfo, x, y + D(42), cx - x - D(14), D(22), TRUE);
+
+    int pageW = cx - sw;
+    int pageH = cy - topH - stH;
+    if (pageW < 10) pageW = 10;
+    if (pageH < 10) pageH = 10;
+
+    for (int i = 0; i < PAGE_COUNT; ++i)
+    {
+        if (g_pages[i] && IsWindowVisible(g_pages[i]))
+            MoveWindow(g_pages[i], sw, topH, pageW, pageH, TRUE);
+    }
+
+    MoveWindow(g_hStatus, sw, cy - stH, cx - sw, stH, TRUE);
+}
+
+static void SwitchPage(int idx)
+{
+    if (idx < 0 || idx >= PAGE_COUNT)
+        return;
+
+    g_curPage = idx;
+
+    int cx = 0, cy = 0, sw = 0, topH = 0, stH = 0;
+    GetGeom(g_hMain, &cx, &cy, &sw, &topH, &stH);
+    int pageW = cx - sw, pageH = cy - topH - stH;
+    if (pageW < 10) pageW = 10;
+    if (pageH < 10) pageH = 10;
+
+    for (int i = 0; i < PAGE_COUNT; ++i)
+    {
+        if (!g_pages[i]) continue;
+        if (i == idx)
+        {
+            MoveWindow(g_pages[i], sw, topH, pageW, pageH, TRUE);
+            ShowWindow(g_pages[i], SW_SHOW);
+        }
+        else
+        {
+            ShowWindow(g_pages[i], SW_HIDE);
+        }
+    }
+
+    InvalidateRect(g_hSidebar, nullptr, FALSE);
+}
+
+// ---------------------------------------------------------------------------
+// 菜单
 // ---------------------------------------------------------------------------
 static void BuildMenu(HWND hWnd)
 {
@@ -785,93 +459,36 @@ static void BuildMenu(HWND hWnd)
     if (!hMenu) return;
 
     HMENU hFile = GetSubMenu(hMenu, 0);
-    if (!hFile) return;
+    if (hFile)
+    {
+        InsertMenuW(hFile, 0, MF_BYPOSITION | MF_STRING, IDM_OPEN_IMAGE, L"打开图片(&O)...\tCtrl+O");
+        InsertMenuW(hFile, 1, MF_BYPOSITION | MF_STRING, IDM_PROCESS_SAVE, L"处理并输出(&S)\tCtrl+S");
+        InsertMenuW(hFile, 2, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    }
 
-    InsertMenuW(hFile, 0, MF_BYPOSITION | MF_STRING, IDM_OPEN_IMAGE, L"打开图片(&O)...\tCtrl+O");
-    InsertMenuW(hFile, 1, MF_BYPOSITION | MF_STRING, IDM_PROCESS_SAVE, L"处理并保存(&S)\tCtrl+S");
-    InsertMenuW(hFile, 2, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    HMENU hFunc = CreatePopupMenu();
+    if (hFunc)
+    {
+        for (int i = 0; i < PAGE_COUNT; ++i)
+        {
+            UINT flags = MF_STRING | ((i == 0) ? MF_CHECKED : 0);
+            AppendMenuW(hFunc, flags, IDM_PAGE_BASE + i, kPageNames[i]);
+        }
+        InsertMenuW(hMenu, 1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hFunc, L"功能(&P)");
+    }
+
     DrawMenuBar(hWnd);
 }
 
-// ---------------------------------------------------------------------------
-// 创建控件
-// ---------------------------------------------------------------------------
-static HFONT CreateUiFont()
+static void SyncPageMenu(HWND hWnd, int idx)
 {
-    NONCLIENTMETRICSW ncm = {};
-    ncm.cbSize = sizeof(ncm);
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0))
-    {
-        HFONT h = CreateFontIndirectW(&ncm.lfMessageFont);
-        if (h) return h;
-    }
-    return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-}
+    HMENU hMenu = GetMenu(hWnd);
+    if (!hMenu) return;
+    HMENU hFunc = GetSubMenu(hMenu, 1);
+    if (!hFunc) return;
 
-static void ApplyFont(HWND h)
-{
-    if (h && g_hFont)
-        SendMessageW(h, WM_SETFONT, (WPARAM)g_hFont, MAKELPARAM(TRUE, 0));
-}
-
-static void CreateControls(HWND hWnd)
-{
-    g_hFont = CreateUiFont();
-
-    g_hBtnOpen = CreateWindowExW(0, L"Button", L"选择图片...",
-                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                                 0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_BTN_OPEN, hInst, nullptr);
-
-    g_hPath = CreateWindowExW(0, L"Static", L"",
-                              WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_PATHELLIPSIS | SS_CENTERIMAGE,
-                              0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_STATIC_PATH, hInst, nullptr);
-
-    g_hInfo = CreateWindowExW(0, L"Static", L"",
-                              WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-                              0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_STATIC_INFO, hInst, nullptr);
-
-    g_hGrpScale = CreateWindowExW(0, L"Button", L"输出尺寸",
-                                  WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-                                  0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_GRP_SCALE, hInst, nullptr);
-
-    static const int kRadioIds[kScaleCount] =
-    {
-        IDC_RADIO_HALF, IDC_RADIO_QUARTER, IDC_RADIO_SIXTH, IDC_RADIO_EIGHTH, IDC_RADIO_TENTH
-    };
-    for (int i = 0; i < kScaleCount; ++i)
-    {
-        DWORD style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTORADIOBUTTON;
-        if (i == 0) style |= WS_GROUP;
-        g_hRadios[i] = CreateWindowExW(0, L"Button", kScales[i].label, style,
-                                       0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)kRadioIds[i], hInst, nullptr);
-    }
-    Button_SetCheck(g_hRadios[0], BST_CHECKED);
-
-    g_hOut = CreateWindowExW(0, L"Static", L"",
-                             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-                             0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_STATIC_OUT, hInst, nullptr);
-
-    g_hPreview = CreateWindowExW(0, L"Static", L"",
-                                 WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-                                 0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_STATIC_PREVIEW, hInst, nullptr);
-
-    g_hBtnProcess = CreateWindowExW(0, L"Button", L"处理",
-                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                                    0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_BTN_PROCESS, hInst, nullptr);
-
-    g_hStatus = CreateWindowExW(0, L"Static", L"",
-                                WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE,
-                                0, 0, 0, 0, hWnd, (HMENU)(INT_PTR)IDC_STATIC_STATUS, hInst, nullptr);
-
-    HWND all[] = { g_hBtnOpen, g_hPath, g_hInfo, g_hGrpScale, g_hOut, g_hPreview, g_hBtnProcess, g_hStatus };
-    for (int i = 0; i < (int)_countof(all); ++i)
-        ApplyFont(all[i]);
-    for (int i = 0; i < kScaleCount; ++i)
-        ApplyFont(g_hRadios[i]);
-
-    UpdateInfoLabel();
-    UpdateOutLabel();
-    SetStatus(L"就绪：请选择一张图片。");
+    for (int i = 0; i < PAGE_COUNT; ++i)
+        CheckMenuItem(hFunc, IDM_PAGE_BASE + i, MF_BYCOMMAND | ((i == idx) ? MF_CHECKED : MF_UNCHECKED));
 }
 
 // ---------------------------------------------------------------------------
@@ -879,23 +496,52 @@ static void CreateControls(HWND hWnd)
 // ---------------------------------------------------------------------------
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 
-LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
     case WM_CREATE:
-        g_hMain = hWnd;
-        CreateControls(hWnd);
-        BuildMenu(hWnd);
-        DragAcceptFiles(hWnd, TRUE);
-        LayoutControls(hWnd);
-        SetFocus(g_hBtnProcess);
+        {
+            g_hMain = hWnd;
+
+            // 侧边栏
+            g_hSidebar = CreateWindowExW(0, SIDEBAR_CLASS, L"",
+                                         WS_CHILD | WS_VISIBLE,
+                                         0, 0, 10, 10, hWnd, (HMENU)(INT_PTR)IDC_SIDEBAR,
+                                         g_hInst, nullptr);
+
+            // 顶部
+            g_hBtnOpen = CreateCtl(L"Button", L"选择图片...", WS_VISIBLE | WS_TABSTOP,
+                                   hWnd, IDC_BTN_OPEN);
+            g_hPath = CreateCtl(L"Static", L"",
+                                WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_PATHELLIPSIS | SS_CENTERIMAGE,
+                                hWnd, IDC_STATIC_PATH);
+            g_hInfo = CreateCtl(L"Static", L"", WS_VISIBLE | SS_LEFTNOWORDWRAP,
+                                hWnd, IDC_STATIC_INFO);
+
+            // 状态栏
+            g_hStatus = CreateCtl(L"Static", L"就绪：请选择一张图片。",
+                                  WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE,
+                                  hWnd, IDC_STATIC_STATUS);
+
+            // 功能页
+            g_pages[0] = PageResize_Create(hWnd);
+            g_pages[1] = PageCrop_Create(hWnd);
+            g_pages[2] = PageAdjust_Create(hWnd);
+            g_pages[3] = PageIco_Create(hWnd);
+
+            BuildMenu(hWnd);
+
+            UpdateTopInfo();
+            LayoutMain(hWnd);
+            SwitchPage(0);
+
+            DragAcceptFiles(hWnd, TRUE);
+        }
         return 0;
 
     case WM_SIZE:
-        LayoutControls(hWnd);
-        if (g_hPreview)
-            InvalidateRect(g_hPreview, nullptr, TRUE);
+        LayoutMain(hWnd);
         return 0;
 
     case WM_GETMINMAXINFO:
@@ -906,18 +552,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             GetClientRect(hWnd, &cr);
             int ncx = (wr.right - wr.left) - (cr.right - cr.left);
             int ncy = (wr.bottom - wr.top) - (cr.bottom - cr.top);
-            mmi->ptMinTrackSize.x = D(760) + ncx;
-            mmi->ptMinTrackSize.y = D(560) + ncy;
+            mmi->ptMinTrackSize.x = D(900) + ncx;
+            mmi->ptMinTrackSize.y = D(640) + ncy;
         }
         return 0;
 
-    case WM_DRAWITEM:
-        if (wParam == IDC_STATIC_PREVIEW)
+    case WM_APP_PAGE_SELECT:
+        SwitchPage((int)wParam);
+        SyncPageMenu(hWnd, (int)wParam);
+        return 0;
+
+    case WM_PAINT:
         {
-            PaintPreview((const DRAWITEMSTRUCT*)lParam);
-            return TRUE;
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+
+            int cx = 0, cy = 0, sw = 0, topH = 0, stH = 0;
+            GetGeom(hWnd, &cx, &cy, &sw, &topH, &stH);
+
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(228, 231, 236));
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            MoveToEx(hdc, sw, cy - stH, nullptr);
+            LineTo(hdc, cx, cy - stH);
+            SelectObject(hdc, oldPen);
+            DeleteObject(pen);
+
+            EndPaint(hWnd, &ps);
         }
-        break;
+        return 0;
 
     case WM_DROPFILES:
         {
@@ -935,40 +597,37 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_COMMAND:
         {
-            const int wmId = LOWORD(wParam);
-            const int wmEvent = HIWORD(wParam);
+            const int id = LOWORD(wParam);
 
-            switch (wmId)
+            switch (id)
             {
             case IDC_BTN_OPEN:
             case IDM_OPEN_IMAGE:
                 OnOpenImage(hWnd);
-                break;
+                return 0;
 
-            case IDC_BTN_PROCESS:
             case IDM_PROCESS_SAVE:
-                OnProcessImage(hWnd);
-                break;
-
-            case IDC_RADIO_HALF:
-            case IDC_RADIO_QUARTER:
-            case IDC_RADIO_SIXTH:
-            case IDC_RADIO_EIGHTH:
-            case IDC_RADIO_TENTH:
-                if (wmEvent == BN_CLICKED)
-                    UpdateOutLabel();
-                break;
+                if (g_pages[g_curPage])
+                    SendMessageW(g_pages[g_curPage], WM_COMMAND,
+                                 MAKEWPARAM(kPageProcessId[g_curPage], BN_CLICKED), 0);
+                return 0;
 
             case IDM_ABOUT:
-                DialogBoxW(hInst, MAKEINTRESOURCEW(IDD_ABOUTBOX), hWnd, About);
-                break;
+                DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_ABOUTBOX), hWnd, About);
+                return 0;
 
             case IDM_EXIT:
                 DestroyWindow(hWnd);
-                break;
+                return 0;
 
             default:
-                return DefWindowProcW(hWnd, message, wParam, lParam);
+                if (id >= IDM_PAGE_BASE && id < IDM_PAGE_BASE + PAGE_COUNT)
+                {
+                    SwitchPage(id - IDM_PAGE_BASE);
+                    SyncPageMenu(hWnd, id - IDM_PAGE_BASE);
+                    return 0;
+                }
+                break;
             }
         }
         return 0;
@@ -981,7 +640,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         DragAcceptFiles(hWnd, FALSE);
         ClearImage();
         if (g_hAccelExtra) { DestroyAcceleratorTable(g_hAccelExtra); g_hAccelExtra = nullptr; }
-        if (g_hFont) { DeleteObject(g_hFont); g_hFont = nullptr; }
+        if (g_hUiFont) { DeleteObject(g_hUiFont); g_hUiFont = nullptr; }
         PostQuitMessage(0);
         return 0;
 
@@ -992,26 +651,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 }
 
 // ---------------------------------------------------------------------------
-// 注册窗口类 / 初始化实例
+// 注册窗口类 / 初始化
 // ---------------------------------------------------------------------------
-// 依次尝试若干图标资源 ID，全部失败则退回系统默认图标
-static HICON LoadAppIcon(HINSTANCE hInstance, int cx, int cy, const int* ids, int count)
-{
-    for (int i = 0; i < count; ++i)
-    {
-        if (ids[i] == 0)
-            continue;
-
-        HICON h = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(ids[i]), IMAGE_ICON,
-                                    cx, cy, LR_SHARED);
-        if (h)
-            return h;
-    }
-    return LoadIconW(nullptr, IDI_APPLICATION);
-}
-
 ATOM MyRegisterClass(HINSTANCE hInstance)
 {
+    // 侧边栏
+    {
+        WNDCLASSEXW wc = {};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = SidebarProc;
+        wc.hInstance = hInstance;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = SIDEBAR_CLASS;
+        RegisterClassExW(&wc);
+    }
+
     const int bigIds[2] = { APP_ICON_MAIN_ID, APP_ICON_SMALL_ID };
     const int smlIds[2] = { APP_ICON_SMALL_ID, APP_ICON_MAIN_ID };
 
@@ -1019,28 +675,24 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.cbSize = sizeof(WNDCLASSEXW);
     wcex.style = CS_HREDRAW | CS_VREDRAW;
     wcex.lpfnWndProc = WndProc;
-    wcex.cbClsExtra = 0;
-    wcex.cbWndExtra = 0;
     wcex.hInstance = hInstance;
-    wcex.hIcon = LoadAppIcon(hInstance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
-                             bigIds, 2);
+    wcex.hIcon = LoadAppIcon(hInstance, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), bigIds, 2);
     wcex.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wcex.lpszMenuName = MAKEINTRESOURCEW(IDC_PROJECT001);
-    wcex.lpszClassName = APP_CLASS_NAME;
-    wcex.hIconSm = LoadAppIcon(hInstance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
-                               smlIds, 2);
+    wcex.lpszClassName = APP_MAIN_CLASS;
+    wcex.hIconSm = LoadAppIcon(hInstance, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), smlIds, 2);
     return RegisterClassExW(&wcex);
 }
 
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
-    hInst = hInstance;
+    g_hInst = hInstance;
 
-    RECT rc = { 0, 0, D(940), D(680) };
+    RECT rc = { 0, 0, D(1060), D(720) };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW, TRUE, 0);
 
-    HWND hWnd = CreateWindowExW(0, APP_CLASS_NAME, APP_WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
+    HWND hWnd = CreateWindowExW(0, APP_MAIN_CLASS, APP_WINDOW_TITLE, WS_OVERLAPPEDWINDOW,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
                                 rc.right - rc.left, rc.bottom - rc.top,
                                 nullptr, nullptr, hInstance, nullptr);
@@ -1063,7 +715,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
 
-    // 高 DPI：让系统按显示器缩放，字体/控件不糊
     SetProcessDPIAware();
     {
         HDC hdc = GetDC(nullptr);
@@ -1074,20 +725,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     INITCOMMONCONTROLSEX icc = {};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_STANDARD_CLASSES;
+    icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
     GdiplusStartupInput gdiplusStartupInput;
-    if (GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, nullptr) != Ok)
+    ULONG_PTR token = 0;
+    if (GdiplusStartup(&token, &gdiplusStartupInput, nullptr) != Ok)
     {
         MessageBoxW(nullptr, L"GDI+ 初始化失败，程序无法启动。", L"错误", MB_OK | MB_ICONERROR);
         return FALSE;
     }
 
+    g_hUiFont = CreateUiFont();
+
     MyRegisterClass(hInstance);
     if (!InitInstance(hInstance, nCmdShow))
     {
-        GdiplusShutdown(g_gdiplusToken);
+        GdiplusShutdown(token);
         return FALSE;
     }
 
@@ -1098,7 +752,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     extra[1].fVirt = FCONTROL | FVIRTKEY; extra[1].key = 'S'; extra[1].cmd = IDM_PROCESS_SAVE;
     g_hAccelExtra = CreateAcceleratorTableW(extra, 2);
 
-    // 命令行传入图片路径时直接打开（也支持把图片拖到 exe 图标上）
+    // 命令行传入图片时直接打开（也支持把图片拖到 exe 图标上）
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1127,11 +781,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         DispatchMessageW(&msg);
     }
 
-    GdiplusShutdown(g_gdiplusToken);
+    GdiplusShutdown(token);
     return (int)msg.wParam;
 }
 
-// “关于”框的消息处理程序
+// ---------------------------------------------------------------------------
+// “关于”对话框
+// ---------------------------------------------------------------------------
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
@@ -1139,11 +795,9 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     {
     case WM_INITDIALOG:
         {
-            // .rc 里“关于”对话框引用的图标 ID 也可能被资源编辑器改掉，
-            // 这里不管资源里写的是哪个 ID，直接用程序图标补上。
             const int ids[2] = { APP_ICON_MAIN_ID, APP_ICON_SMALL_ID };
-            HICON hBig = LoadAppIcon(hInst, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), ids, 2);
-            HICON hSm = LoadAppIcon(hInst, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), ids, 2);
+            HICON hBig = LoadAppIcon(g_hInst, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), ids, 2);
+            HICON hSm = LoadAppIcon(g_hInst, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), ids, 2);
 
             SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hBig);
             SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hSm);
