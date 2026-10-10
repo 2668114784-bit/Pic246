@@ -88,7 +88,6 @@ COLORREF        g_fillColor = RGB(255, 255, 255); // 裁切/ICO 页共用的填�
 // 在此之前（例如全局对象构造期）不能调用 MoveWindow/SetWindowText 等。
 static HWND  g_hSidebar = nullptr;   // 左侧导航栏（自绘，窗口类见 SIDEBAR_CLASS）
 static HWND  g_hBtnOpen = nullptr;   // 顶部“选择图片...”按钮
-static HWND  g_hBtnAuthor = nullptr; // 顶部“关于作者”按钮
 static HWND  g_hPath = nullptr;      // 顶部显示图片完整路径的 Static
 static HWND  g_hInfo = nullptr;      // 顶部显示“原图尺寸：宽 × 高”的 Static
 static HWND  g_hStatus = nullptr;    // 底部状态栏 Static
@@ -575,13 +574,8 @@ static void LayoutMain(HWND hWnd)
     const int y = D(14);                               // 顶行控件的 y
     MoveWindow(g_hBtnOpen, x, y, D(132), D(34), TRUE); // “选择图片...”按钮
 
-    const int auW = D(104);                            // “关于作者”按钮宽度
-    const int auX = cx - D(14) - auW;                  // 让它靠右：客户区宽 - 右边距 - 自身宽
-    if (g_hBtnAuthor)
-        MoveWindow(g_hBtnAuthor, auX, y, auW, D(34), TRUE);
-
     const int px = x + D(132) + D(10);                 // 路径框起点：按钮右侧留 10 像素
-    int pathW = auX - D(10) - px;                      // 路径框宽度：占满按钮与作者按钮之间的剩余空间
+    int pathW = cx - D(14) - px;                       // 路径框宽度：占满按钮右侧的剩余空间
     if (pathW < D(60)) pathW = D(60);                  // 窗口太窄时的保底宽度（配合最小窗口限制）
     MoveWindow(g_hPath, px, y, pathW, D(34), TRUE);
     MoveWindow(g_hInfo, x, y + D(42), cx - x - D(14), D(22), TRUE);   // 第二行：原图尺寸信息
@@ -600,6 +594,9 @@ static void LayoutMain(HWND hWnd)
 
     MoveWindow(g_hStatus, sw, cy - stH, cx - sw, stH, TRUE);   // 状态栏：底部右侧那一条
 }
+
+// 前置声明：SwitchPage 里要用到 SyncSidebarSel，它的完整定义在下面。
+static void SyncSidebarSel(int idx);
 
 // 【函数】SwitchPage —— 显示第 idx 页、隐藏其余页
 // 参数：idx 页号（越界直接忽略）
@@ -633,7 +630,21 @@ static void SwitchPage(int idx)
         }
     }
 
-    InvalidateRect(g_hSidebar, nullptr, FALSE);   // 让侧边栏重画高亮项（它自己不知道页号变了）
+    SyncSidebarSel(idx);                          // 同步侧边栏高亮项（用菜单切页时它自己不知道）
+}
+
+// 【函数】SyncSidebarSel —— 把侧边栏的高亮项同步成当前页
+// 参数：idx 当前页号
+// 说明：侧边栏的“选中项”存在它自己的 SidebarState::sel 里，只有【用户点击侧边栏】
+//       时它才会自己改。如果是从“功能”菜单（或将来任何代码路径）切页，
+//       就必须由主窗口主动把 sel 改过来，否则会出现“内容换页了、左侧高亮还停在旧项上”。
+static void SyncSidebarSel(int idx)
+{
+    SidebarState* st = g_hSidebar ? SidebarOf(g_hSidebar) : nullptr;
+    if (!st || st->sel == idx)
+        return;                                   // 没有侧边栏 / 本来就一致，不必重画
+    st->sel = idx;                                // 改状态
+    InvalidateRect(g_hSidebar, nullptr, FALSE);   // 立刻重画，让高亮跟着走
 }
 
 // ---------------------------------------------------------------------------
@@ -731,8 +742,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_hBtnOpen = CreateCtl(L"Button", L"选择图片...", WS_VISIBLE | WS_TABSTOP,
                                    hWnd, IDC_BTN_OPEN);
             // WS_TABSTOP 让这个控件可以被 Tab 键切换焦点（键盘可用性的基本要求）
-            g_hBtnAuthor = CreateCtl(L"Button", L"关于作者", WS_VISIBLE | WS_TABSTOP,
-                                     hWnd, IDC_BTN_AUTHOR);
             g_hPath = CreateCtl(L"Static", L"",
                                 WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_PATHELLIPSIS | SS_CENTERIMAGE,
                                 hWnd, IDC_STATIC_PATH);
@@ -867,7 +876,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_ABOUTBOX), hWnd, About);
                 return 0;
 
-            case IDC_BTN_AUTHOR:
             case IDM_AUTHOR:
                 DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_AUTHORBOX), hWnd, AuthorBox);
                 return 0;

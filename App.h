@@ -168,7 +168,6 @@ enum : int
     IDC_STATIC_PATH      = 1002,   // 顶栏显示当前文件路径的静态文本
     IDC_STATIC_INFO      = 1003,   // 顶栏显示“宽×高 / 是否有透明”等信息的静态文本
     IDC_STATIC_STATUS    = 1004,   // 底部状态栏文字
-    IDC_BTN_AUTHOR       = 1005,   // 顶栏“关于作者”按钮
     IDC_SIDEBAR          = 1010,   // 左侧边栏控件（承载一排功能页按钮）
 
     // 图片尺寸缩放页
