@@ -47,6 +47,18 @@
     <ClCompile Include="PageAdjust.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="PageCompress.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageConvert.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="PageDraw.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="DrawCanvas.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="PageIco.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

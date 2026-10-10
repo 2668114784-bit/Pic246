@@ -31,22 +31,25 @@ COLORREF        g_fillColor = RGB(255, 255, 255);
 // ---------------------------------------------------------------------------
 static HWND  g_hSidebar = nullptr;
 static HWND  g_hBtnOpen = nullptr;
+static HWND  g_hBtnAuthor = nullptr;
 static HWND  g_hPath = nullptr;
 static HWND  g_hInfo = nullptr;
 static HWND  g_hStatus = nullptr;
 
-#define PAGE_COUNT 4
+#define PAGE_COUNT 7
 static HWND  g_pages[PAGE_COUNT] = {};
 static int   g_curPage = 0;
 
 static const wchar_t* kPageNames[PAGE_COUNT] =
 {
-    L"图片尺寸缩放", L"图片裁切", L"图片调整", L"ICO 转换"
+    L"图片尺寸缩放", L"图片裁切", L"图片调整", L"图片大小压缩",
+    L"格式转换", L"ICO 转换", L"涂鸦"
 };
 
 static const int kPageProcessId[PAGE_COUNT] =
 {
-    IDC_RS_BTN_PROCESS, IDC_CP_BTN_PROCESS, IDC_AD_BTN_PROCESS, IDC_IC_BTN_PROCESS
+    IDC_RS_BTN_PROCESS, IDC_CP_BTN_PROCESS, IDC_AD_BTN_PROCESS, IDC_CM_BTN_PROCESS,
+    IDC_CV_BTN_PROCESS, IDC_IC_BTN_PROCESS, IDC_DR_BTN_PROCESS
 };
 
 static HACCEL g_hAccelExtra = nullptr;
@@ -402,8 +405,16 @@ static void LayoutMain(HWND hWnd)
     const int x = sw + D(14);
     const int y = D(14);
     MoveWindow(g_hBtnOpen, x, y, D(132), D(34), TRUE);
+
+    const int auW = D(104);
+    const int auX = cx - D(14) - auW;
+    if (g_hBtnAuthor)
+        MoveWindow(g_hBtnAuthor, auX, y, auW, D(34), TRUE);
+
     const int px = x + D(132) + D(10);
-    MoveWindow(g_hPath, px, y, cx - px - D(14), D(34), TRUE);
+    int pathW = auX - D(10) - px;
+    if (pathW < D(60)) pathW = D(60);
+    MoveWindow(g_hPath, px, y, pathW, D(34), TRUE);
     MoveWindow(g_hInfo, x, y + D(42), cx - x - D(14), D(22), TRUE);
 
     int pageW = cx - sw;
@@ -477,6 +488,13 @@ static void BuildMenu(HWND hWnd)
         InsertMenuW(hMenu, 1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)hFunc, L"功能(&P)");
     }
 
+    HMENU hHelp = GetSubMenu(hMenu, 2);
+    if (hHelp)
+    {
+        InsertMenuW(hHelp, 0, MF_BYPOSITION | MF_STRING, IDM_AUTHOR, L"关于作者(&A)...");
+        InsertMenuW(hHelp, 1, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+    }
+
     DrawMenuBar(hWnd);
 }
 
@@ -495,6 +513,7 @@ static void SyncPageMenu(HWND hWnd, int idx)
 // 窗口过程
 // ---------------------------------------------------------------------------
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+INT_PTR CALLBACK AuthorBox(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -513,6 +532,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             // 顶部
             g_hBtnOpen = CreateCtl(L"Button", L"选择图片...", WS_VISIBLE | WS_TABSTOP,
                                    hWnd, IDC_BTN_OPEN);
+            g_hBtnAuthor = CreateCtl(L"Button", L"关于作者", WS_VISIBLE | WS_TABSTOP,
+                                     hWnd, IDC_BTN_AUTHOR);
             g_hPath = CreateCtl(L"Static", L"",
                                 WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_PATHELLIPSIS | SS_CENTERIMAGE,
                                 hWnd, IDC_STATIC_PATH);
@@ -528,7 +549,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_pages[0] = PageResize_Create(hWnd);
             g_pages[1] = PageCrop_Create(hWnd);
             g_pages[2] = PageAdjust_Create(hWnd);
-            g_pages[3] = PageIco_Create(hWnd);
+            g_pages[3] = PageCompress_Create(hWnd);
+            g_pages[4] = PageConvert_Create(hWnd);
+            g_pages[5] = PageIco_Create(hWnd);
+            g_pages[6] = PageDraw_Create(hWnd);
 
             BuildMenu(hWnd);
 
@@ -614,6 +638,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
             case IDM_ABOUT:
                 DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_ABOUTBOX), hWnd, About);
+                return 0;
+
+            case IDC_BTN_AUTHOR:
+            case IDM_AUTHOR:
+                DialogBoxW(g_hInst, MAKEINTRESOURCEW(IDD_AUTHORBOX), hWnd, AuthorBox);
                 return 0;
 
             case IDM_EXIT:
@@ -815,6 +844,84 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
         return (INT_PTR)TRUE;
 
     case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+// ---------------------------------------------------------------------------
+// “关于作者”对话框
+// ---------------------------------------------------------------------------
+#define IDC_BTN_COPYQQ 1201
+
+static void SetClipText(HWND owner, const wchar_t* text)
+{
+    if (!OpenClipboard(owner)) return;
+    EmptyClipboard();
+    const size_t bytes = (wcslen(text) + 1) * sizeof(wchar_t);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hMem)
+    {
+        void* p = GlobalLock(hMem);
+        if (p)
+        {
+            memcpy(p, text, bytes);
+            GlobalUnlock(hMem);
+            SetClipboardData(CF_UNICODETEXT, hMem);
+        }
+        else
+        {
+            GlobalFree(hMem);
+        }
+    }
+    CloseClipboard();
+}
+
+INT_PTR CALLBACK AuthorBox(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        {
+            const int ids[2] = { APP_ICON_MAIN_ID, APP_ICON_SMALL_ID };
+            HICON hBig = LoadAppIcon(g_hInst, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), ids, 2);
+            HICON hSm = LoadAppIcon(g_hInst, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), ids, 2);
+
+            SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hBig);
+            SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hSm);
+
+            HWND hChild = nullptr;
+            while ((hChild = FindWindowExW(hDlg, hChild, L"Static", nullptr)) != nullptr)
+            {
+                if ((GetWindowLongW(hChild, GWL_STYLE) & SS_TYPEMASK) == SS_ICON)
+                {
+                    SendMessageW(hChild, STM_SETICON, (WPARAM)hBig, 0);
+                    break;
+                }
+            }
+
+            // 追加一个“复制 QQ 号”按钮
+            HWND hCopy = CreateWindowExW(0, L"Button", L"复制 QQ 号",
+                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                         100, 102, 68, 16, hDlg, (HMENU)(INT_PTR)IDC_BTN_COPYQQ,
+                                         g_hInst, nullptr);
+            ApplyUiFont(hCopy);
+        }
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_BTN_COPYQQ)
+        {
+            SetClipText(hDlg, L"2668114784");
+            SetWindowTextW(GetDlgItem(hDlg, IDC_BTN_COPYQQ), L"已复制!");
+            return (INT_PTR)TRUE;
+        }
         if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
         {
             EndDialog(hDlg, LOWORD(wParam));

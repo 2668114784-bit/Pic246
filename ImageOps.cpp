@@ -101,6 +101,18 @@ bool FormatSupportsAlpha()
     return SourceFmt()->alpha;
 }
 
+OutFmtGuess GuessSourceMime()
+{
+    const OutFmt* f = SourceFmt();
+    OutFmtGuess g;
+    g.mime = f->mime;
+    g.ext = f->ext;
+    g.alpha = f->alpha;
+    if (_wcsicmp(g.ext.c_str(), L".jpeg") == 0) g.ext = L".jpg";
+    if (_wcsicmp(g.ext.c_str(), L".tiff") == 0) g.ext = L".tif";
+    return g;
+}
+
 static bool GetEncoderClsid(const wchar_t* mime, CLSID* pClsid)
 {
     UINT num = 0, size = 0;
@@ -901,4 +913,248 @@ void PaintColorSwatch(HDC hdc, const RECT& rc, COLORREF c, bool transparent)
     HBRUSH bBorder = CreateSolidBrush(RGB(160, 164, 170));
     FrameRect(hdc, &rc, bBorder);
     DeleteObject(bBorder);
+}
+
+// ---------------------------------------------------------------------------
+// 编码器枚举 / 体积预估 / 指定格式保存（压缩页、格式转换页使用）
+// ---------------------------------------------------------------------------
+std::wstring FormatBytes(size_t bytes)
+{
+    wchar_t buf[64];
+    if (bytes >= (size_t)1024 * 1024)
+        swprintf_s(buf, L"%.2f MB", (double)bytes / (1024.0 * 1024.0));
+    else if (bytes >= 1024)
+        swprintf_s(buf, L"%.1f KB", (double)bytes / 1024.0);
+    else
+        swprintf_s(buf, L"%u B", (unsigned)bytes);
+    return buf;
+}
+
+std::vector<EncoderChoice> ListImageEncoders()
+{
+    std::vector<EncoderChoice> out;
+
+    UINT num = 0, size = 0;
+    if (GetImageEncodersSize(&num, &size) != Ok || size == 0)
+        return out;
+
+    std::vector<BYTE> buf(size);
+    ImageCodecInfo* pInfo = (ImageCodecInfo*)buf.data();
+    if (GetImageEncoders(num, size, pInfo) != Ok)
+        return out;
+
+    struct Wanted { const wchar_t* mime; const wchar_t* name; const wchar_t* ext; };
+    static const Wanted wanted[] =
+    {
+        { L"image/png",  L"PNG",  L".png"  },
+        { L"image/jpeg", L"JPEG", L".jpg"  },
+        { L"image/bmp",  L"BMP",  L".bmp"  },
+        { L"image/gif",  L"GIF",  L".gif"  },
+        { L"image/tiff", L"TIFF", L".tif"  },
+        { L"image/webp", L"WebP", L".webp" },
+    };
+
+    for (int w = 0; w < (int)_countof(wanted); ++w)
+    {
+        for (UINT i = 0; i < num; ++i)
+        {
+            if (_wcsicmp(pInfo[i].MimeType, wanted[w].mime) == 0)
+            {
+                EncoderChoice c;
+                c.name = wanted[w].name;
+                c.mime = wanted[w].mime;
+                c.ext = wanted[w].ext;
+                out.push_back(c);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+static bool IsLossyMime(const std::wstring& mime)
+{
+    return _wcsicmp(mime.c_str(), L"image/jpeg") == 0 || _wcsicmp(mime.c_str(), L"image/webp") == 0;
+}
+
+static size_t EncodeToMemory(Image* bmp, const std::wstring& mime, ULONG quality, std::vector<BYTE>* outData)
+{
+    if (!bmp) return 0;
+
+    CLSID clsid = {};
+    if (!GetEncoderClsid(mime.c_str(), &clsid))
+        return 0;
+
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &pStream)))
+        return 0;
+
+    bool ok = false;
+    if (IsLossyMime(mime))
+    {
+        ULONG q = quality;
+        EncoderParameters ep;
+        ep.Count = 1;
+        ep.Parameter[0].Guid = EncoderQuality;
+        ep.Parameter[0].Type = EncoderParameterValueTypeLong;
+        ep.Parameter[0].NumberOfValues = 1;
+        ep.Parameter[0].Value = &q;
+        ok = (bmp->Save(pStream, &clsid, &ep) == Ok);
+    }
+    else
+    {
+        ok = (bmp->Save(pStream, &clsid, nullptr) == Ok);
+    }
+
+    size_t n = 0;
+    if (ok)
+    {
+        STATSTG st = {};
+        if (SUCCEEDED(pStream->Stat(&st, STATFLAG_NONAME)))
+            n = (size_t)st.cbSize.QuadPart;
+
+        if (outData && n > 0)
+        {
+            outData->resize(n);
+            LARGE_INTEGER zero = {};
+            pStream->Seek(zero, STREAM_SEEK_SET, nullptr);
+            ULONG got = 0;
+            if (FAILED(pStream->Read(outData->data(), (ULONG)n, &got)) || got != n)
+            {
+                outData->clear();
+                n = 0;
+            }
+        }
+    }
+    pStream->Release();
+    return n;
+}
+
+size_t EstimateEncodedSize(Image* bmp, const std::wstring& mime, ULONG quality)
+{
+    return EncodeToMemory(bmp, mime, quality, nullptr);
+}
+
+int FindQualityForTargetSize(Image* bmp, size_t targetBytes, size_t* actualBytes)
+{
+    if (actualBytes) *actualBytes = 0;
+    if (!bmp || targetBytes == 0) return 0;
+
+    int best = 0;
+    size_t bestSize = 0;
+
+    // 二分找“不超过目标体积”的最高画质
+    int lo = 10, hi = 100;
+    while (lo <= hi)
+    {
+        int mid = (lo + hi) / 2;
+        size_t sz = EncodeToMemory(bmp, L"image/jpeg", (ULONG)mid, nullptr);
+        if (sz == 0) { hi = mid - 1; continue; }
+        if (sz <= targetBytes) { best = mid; bestSize = sz; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+
+    if (best == 0)
+    {
+        best = 10;
+        bestSize = EncodeToMemory(bmp, L"image/jpeg", 10, nullptr);
+    }
+
+    if (actualBytes) *actualBytes = bestSize;
+    return best;
+}
+
+size_t SourceFileSize()
+{
+    if (g_srcPath.empty()) return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (!GetFileAttributesExW(g_srcPath.c_str(), GetFileExInfoStandard, &fad))
+        return 0;
+    return (size_t)(((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow);
+}
+
+static size_t FileSizeOf(const std::wstring& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        return 0;
+    return (size_t)(((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow);
+}
+
+bool SaveBitmapAsFormat(Bitmap* bmp, const std::wstring& suffix, const std::wstring& mime,
+                        const std::wstring& ext, ULONG quality, HWND owner)
+{
+    if (!bmp) return false;
+
+    std::wstring outPath = DirNameOf(g_srcPath) + StemOf(g_srcPath) + suffix + ext;
+
+    if (FileExists(outPath))
+    {
+        wchar_t q[1024];
+        swprintf_s(q, L"输出文件已存在：\r\n%s\r\n\r\n是否覆盖？", outPath.c_str());
+        if (MessageBoxW(g_hMain ? g_hMain : owner, q, L"确认覆盖", MB_YESNO | MB_ICONWARNING) != IDYES)
+        {
+            delete bmp;
+            SetAppStatus(L"已取消：输出文件已存在。");
+            return false;
+        }
+    }
+
+    CLSID clsid = {};
+    if (!GetEncoderClsid(mime.c_str(), &clsid))
+    {
+        delete bmp;
+        MessageBoxW(g_hMain ? g_hMain : owner, L"系统中找不到对应的图片编码器，无法保存。", L"处理失败",
+                    MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    const int w = bmp->GetWidth();
+    const int h = bmp->GetHeight();
+
+    if (FileExists(outPath))
+        DeleteFileW(outPath.c_str());
+
+    Status st;
+    if (IsLossyMime(mime))
+    {
+        ULONG q = quality;
+        EncoderParameters ep;
+        ep.Count = 1;
+        ep.Parameter[0].Guid = EncoderQuality;
+        ep.Parameter[0].Type = EncoderParameterValueTypeLong;
+        ep.Parameter[0].NumberOfValues = 1;
+        ep.Parameter[0].Value = &q;
+        st = bmp->Save(outPath.c_str(), &clsid, &ep);
+    }
+    else
+    {
+        st = bmp->Save(outPath.c_str(), &clsid, nullptr);
+    }
+    delete bmp;
+
+    if (st != Ok)
+    {
+        std::wstring err = L"保存文件失败（目标文件可能被其它程序占用，或没有写入权限）。";
+        MessageBoxW(g_hMain ? g_hMain : owner, err.c_str(), L"处理失败", MB_OK | MB_ICONERROR);
+        SetAppStatus(L"处理失败：" + err);
+        return false;
+    }
+
+    const size_t outSize = FileSizeOf(outPath);
+    const size_t srcSize = SourceFileSize();
+
+    SetAppStatus(L"处理完成：" + outPath + L"  (" + FormatBytes(outSize) + L")");
+
+    wchar_t extra[512];
+    if (srcSize > 0 && outSize > 0)
+        swprintf_s(extra, L"输出尺寸：%d × %d 像素\r\n文件大小：%s → %s（%.0f%%）\r\n",
+                   w, h, FormatBytes(srcSize).c_str(), FormatBytes(outSize).c_str(),
+                   100.0 * (double)outSize / (double)srcSize);
+    else
+        swprintf_s(extra, L"输出尺寸：%d × %d 像素\r\n文件大小：%s\r\n",
+                   w, h, FormatBytes(outSize).c_str());
+
+    ShowDoneAndOpenFolder(g_hMain ? g_hMain : owner, outPath, extra);
+    return true;
 }

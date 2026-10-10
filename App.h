@@ -83,6 +83,7 @@ enum : int
     IDC_STATIC_PATH      = 1002,
     IDC_STATIC_INFO      = 1003,
     IDC_STATIC_STATUS    = 1004,
+    IDC_BTN_AUTHOR       = 1005,
     IDC_SIDEBAR          = 1010,
 
     // 图片尺寸缩放页
@@ -131,10 +132,55 @@ enum : int
     IDC_IC_CHK_TRANS     = 1422,
     IDC_IC_SWATCH        = 1423,
 
+    // 图片大小压缩页
+    IDC_CM_PREVIEW       = 1500,
+    IDC_CM_GRP_MODE      = 1501,
+    IDC_CM_RADIO_QUALITY = 1502,
+    IDC_CM_RADIO_TARGET  = 1503,
+    IDC_CM_GRP_PARAM     = 1504,
+    IDC_CM_TRK_QUALITY   = 1505,
+    IDC_CM_LBL_QUALITY   = 1506,
+    IDC_CM_EDIT_TARGET   = 1507,
+    IDC_CM_LBL_UNIT      = 1508,
+    IDC_CM_GRP_FORMAT    = 1509,
+    IDC_CM_RADIO_KEEP    = 1510,
+    IDC_CM_RADIO_JPEG    = 1511,
+    IDC_CM_RADIO_PNG     = 1512,
+    IDC_CM_LBL_EST       = 1513,
+    IDC_CM_LBL_ORIG      = 1514,
+    IDC_CM_BTN_PROCESS   = 1515,
+
+    // 格式转换页
+    IDC_CV_PREVIEW       = 1600,
+    IDC_CV_GRP_FORMAT    = 1601,
+    IDC_CV_COMBO_FORMAT  = 1602,
+    IDC_CV_LBL_FMTINFO   = 1603,
+    IDC_CV_GRP_OPT       = 1604,
+    IDC_CV_TRK_QUALITY   = 1605,
+    IDC_CV_LBL_QUALITY   = 1606,
+    IDC_CV_CHK_TRANS     = 1607,
+    IDC_CV_BTN_COLOR     = 1608,
+    IDC_CV_SWATCH        = 1609,
+    IDC_CV_LBL_EST       = 1610,
+    IDC_CV_BTN_PROCESS   = 1611,
+
+    // 涂鸦页
+    IDC_DR_CANVAS        = 1700,
+    IDC_DR_GRP_BRUSH     = 1701,
+    IDC_DR_TRK_SIZE      = 1702,
+    IDC_DR_LBL_SIZE      = 1703,
+    IDC_DR_BTN_COLOR     = 1704,
+    IDC_DR_SWATCH        = 1705,
+    IDC_DR_BTN_PICK      = 1706,
+    IDC_DR_BTN_UNDO      = 1707,
+    IDC_DR_BTN_CLEAR     = 1708,
+    IDC_DR_BTN_PROCESS   = 1709,
+    IDC_DR_LBL_HINT      = 1710,
     // 菜单命令
     IDM_OPEN_IMAGE       = 40001,
     IDM_PROCESS_SAVE     = 40002,
-    IDM_PAGE_BASE        = 40010,  // 40010 .. 40013
+    IDM_AUTHOR           = 40003,
+    IDM_PAGE_BASE        = 40010,  // 40010 .. 40016
 };
 
 // ICO 可选尺寸
@@ -197,6 +243,31 @@ bool  SaveBitmapWithSuffix(Gdiplus::Bitmap* bmp, const std::wstring& suffix, HWN
 bool  SaveIcoWithSuffix(Gdiplus::Bitmap* square, const std::vector<int>& sizes, HWND owner,
                         std::wstring* donePath);           // 内部会 delete square
 COLORREF ChooseFillColor(HWND owner, COLORREF current);
+
+// 编码器枚举 / 体积预估（压缩页、格式转换页使用）
+struct EncoderChoice
+{
+    std::wstring name;   // 显示名，如 "JPEG"
+    std::wstring mime;   // image/jpeg
+    std::wstring ext;    // .jpg
+};
+
+struct OutFmtGuess
+{
+    std::wstring mime;
+    std::wstring ext;      // 含点，如 .jpg
+    bool         alpha;
+};
+
+std::vector<EncoderChoice> ListImageEncoders();                       // 系统可用的图片编码器
+OutFmtGuess GuessSourceMime();                                        // 按源文件扩展名推测输出格式
+size_t EstimateEncodedSize(Gdiplus::Image* img, const std::wstring& mime, ULONG quality);
+int    FindQualityForTargetSize(Gdiplus::Image* img, size_t targetBytes, size_t* actualBytes);
+bool   SaveBitmapAsFormat(Gdiplus::Bitmap* bmp, const std::wstring& suffix,
+                          const std::wstring& mime, const std::wstring& ext,
+                          ULONG quality, HWND owner);
+std::wstring FormatBytes(size_t bytes);
+size_t SourceFileSize();
 bool  FormatSupportsAlpha();                               // 当前源图扩展名是否支持透明
 
 void  PaintCheckerBackground(HDC hdc, const RECT& rc);
@@ -224,3 +295,23 @@ HWND PageResize_Create(HWND parent);
 HWND PageCrop_Create(HWND parent);
 HWND PageAdjust_Create(HWND parent);
 HWND PageIco_Create(HWND parent);
+HWND PageCompress_Create(HWND parent);
+HWND PageConvert_Create(HWND parent);
+HWND PageDraw_Create(HWND parent);
+// ---------------------------------------------------------------------------
+// 涂鸦画布（定义在 DrawCanvas.cpp）
+//   · 画笔绘制（矢量笔迹，可撤销）
+//   · 吸色：点击画面取色
+// ---------------------------------------------------------------------------
+#define DRAWCANVAS_CLASS L"Pic246DrawCanvas"
+
+#define WM_APP_PICKED_COLOR  (WM_APP + 4)   // 画布 -> 父窗口：吸到的颜色在 wParam
+
+HWND DrawCanvas_Create(HWND parent, int id);
+void DrawCanvas_RefreshImage(HWND h);              // 源图变化
+void DrawCanvas_SetBrush(HWND h, COLORREF color, int width);
+void DrawCanvas_SetPickMode(HWND h, bool on);
+bool DrawCanvas_CanUndo(HWND h);
+void DrawCanvas_Undo(HWND h);
+void DrawCanvas_Clear(HWND h);
+Gdiplus::Bitmap* DrawCanvas_RenderFull(HWND h);    // 按原图分辨率合成一张（调用者释放）
